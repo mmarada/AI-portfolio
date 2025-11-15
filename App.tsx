@@ -1,39 +1,97 @@
+
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
-import { PortfolioSuggestion, PortfolioDetails, SuggestedAsset, MarketData, AdvancedAnalytics, TaxLossSuggestion, OptimizationGoal } from './types';
-import { fetchPortfolioSuggestion, fetchOptimizedAllocations } from './services/geminiService';
-import { fetchMarketData, fetchAssetFinancials } from './services/marketDataService';
+import { PortfolioSuggestion, PortfolioDetails, SuggestedAsset, MarketData, OptimizationGoal, LinkedAccount, PerformanceDataPoint, Holding, ToastMessage } from './types';
+import { fetchPortfolioSuggestion } from './services/geminiService';
+import { fetchMarketData, fetchAssetFinancials, simulateLinkBrokerageAccount, fetchPerformanceHistory } from './services/marketDataService';
 import InputForm from './components/InputForm';
 import AnalysisResult from './components/AnalysisResult';
 import LoadingSpinner from './components/LoadingSpinner';
 import ErrorDisplay from './components/ErrorDisplay';
 import PortfolioSandbox from './components/PortfolioSandbox';
+import WelcomeScreen from './components/WelcomeScreen';
+import { ToastContainer } from './components/Toast';
+
+type AppMode = 'suggestion' | 'live';
 
 const App: React.FC = () => {
+  const [mode, setMode] = useState<AppMode>('suggestion');
+  
+  // Suggestion Mode State
   const [suggestionResult, setSuggestionResult] = useState<PortfolioSuggestion | null>(null);
   const [selectedPortfolioIndex, setSelectedPortfolioIndex] = useState(0);
+  
+  // Live Mode State
+  const [linkedAccount, setLinkedAccount] = useState<LinkedAccount | null>(null);
+  const [performanceHistory, setPerformanceHistory] = useState<PerformanceDataPoint[] | null>(null);
+
+  // Shared State
   const [userAddedAssets, setUserAddedAssets] = useState<SuggestedAsset[]>([]);
   const [userProfile, setUserProfile] = useState<{ amount: number, riskLevel: string, horizon: string, goal: string } | null>(null);
-  
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [isProcessing, setIsProcessing] = useState<boolean>(false); // For sandbox actions
   const [error, setError] = useState<string | null>(null);
   const [marketData, setMarketData] = useState<Record<string, MarketData>>({});
   const [isMarketDataLoading, setIsMarketDataLoading] = useState(false);
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
-  // State for advanced features
-  const [advancedAnalytics, setAdvancedAnalytics] = useState<AdvancedAnalytics | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
+    const id = Date.now();
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => {
+        removeToast(id);
+    }, 5000);
+  }, []);
+
+  const removeToast = (id: number) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  };
 
 
-  const allPortfolios = useMemo(() => {
+  const allSuggestedPortfolios = useMemo(() => {
     if (!suggestionResult) return [];
     return [suggestionResult.primary, ...suggestionResult.alternatives];
   }, [suggestionResult]);
   
-  const activePortfolio = useMemo(() => {
-    if (!suggestionResult) return null;
+  const activePortfolio = useMemo<PortfolioDetails | null>(() => {
+    let basePortfolio: PortfolioDetails | null = null;
 
-    const basePortfolio = allPortfolios[selectedPortfolioIndex];
+    if (mode === 'suggestion' && suggestionResult) {
+        basePortfolio = allSuggestedPortfolios[selectedPortfolioIndex];
+    } else if (mode === 'live' && linkedAccount) {
+        const liveAssets = linkedAccount.holdings.map((h: Holding) => ({
+            ticker: h.ticker,
+            name: h.name,
+            sector: h.sector,
+            allocation: (h.value / linkedAccount.totalValue) * 100,
+            beta: 1.0, 
+            expectedReturn: 8.0, 
+            volatility: 15.0, 
+            rationale: `From linked account: ${linkedAccount.accountName}`,
+            purchasePrice: h.purchasePrice,
+        }));
+
+        basePortfolio = {
+            title: `Live Portfolio (${linkedAccount.accountName})`,
+            portfolio: liveAssets,
+            strategy: {
+                summary: 'This is an analysis of your currently held assets from your linked brokerage account.',
+                conservativeMeasures: 'Review your live holdings for concentration risk and consider diversification.',
+                marketOutlook: 'Market conditions can affect your live holdings. Stay informed on relevant news.',
+                portfolioMetrics: {
+                    expectedReturn: 8.0, 
+                    volatility: 15.0, 
+                    weightedBeta: 1.0, 
+                    riskScore: 5,
+                },
+                benchmarks: [
+                    { name: 'S&P 500', expectedReturn: 10, volatility: 18 },
+                ],
+            }
+        };
+    }
+    
+    if (!basePortfolio) return null;
+
     if (userAddedAssets.length === 0) {
         return basePortfolio;
     }
@@ -57,14 +115,14 @@ const App: React.FC = () => {
 
     return {
         ...basePortfolio,
-        title: `${allPortfolios[selectedPortfolioIndex].title} (Sandbox Mode)`,
+        title: `${basePortfolio.title} (Sandbox Mode)`,
         portfolio: newPortfolioAssets,
         strategy: {
             ...basePortfolio.strategy,
             portfolioMetrics: newMetrics,
         }
     };
-  }, [suggestionResult, selectedPortfolioIndex, userAddedAssets, allPortfolios]);
+  }, [mode, suggestionResult, linkedAccount, selectedPortfolioIndex, userAddedAssets, allSuggestedPortfolios]);
 
 
   const handleSuggestion = useCallback(async (amount: number, riskLevel: string, horizon: string, goal: string) => {
@@ -72,14 +130,15 @@ const App: React.FC = () => {
     setIsLoading(true);
     setError(null);
     setSuggestionResult(null);
+    setLinkedAccount(null);
+    setPerformanceHistory(null);
     setUserAddedAssets([]);
-    setAdvancedAnalytics(null);
+    setMode('suggestion');
     setUserProfile({amount, riskLevel, horizon, goal});
 
     try {
       const data = await fetchPortfolioSuggestion(amount, riskLevel, horizon, goal);
       
-      // Simulate purchase prices for tax-loss harvesting feature
       const allTickers = [
           ...data.primary.portfolio.map(a => a.ticker),
           ...data.alternatives.flatMap(p => p.portfolio.map(a => a.ticker))
@@ -91,7 +150,6 @@ const App: React.FC = () => {
           ...p,
           portfolio: p.portfolio.map(asset => ({
               ...asset,
-              // Simulate a purchase price with a random fluctuation between -4% and +16% of current price
               purchasePrice: liveMarketData[asset.ticker]?.currentPrice * (1 + (Math.random() - 0.2) * 0.2)
           }))
       });
@@ -103,42 +161,63 @@ const App: React.FC = () => {
 
       setSuggestionResult(dataWithPrices);
       setSelectedPortfolioIndex(0);
+      addToast('AI portfolio suggestions generated successfully!', 'success');
     } catch (err) {
       setError(err instanceof Error ? err.message : "An unknown error occurred.");
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [addToast]);
+
+  const handleLinkAccount = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    setSuggestionResult(null);
+    setLinkedAccount(null);
+    setPerformanceHistory(null);
+    setUserAddedAssets([]);
+    try {
+      const [accountData, perfData] = await Promise.all([
+        simulateLinkBrokerageAccount(),
+        fetchPerformanceHistory()
+      ]);
+      setLinkedAccount(accountData);
+      setPerformanceHistory(perfData);
+      setUserProfile(prev => prev ? { ...prev, amount: accountData.totalValue } : { amount: accountData.totalValue, riskLevel: 'Moderate', horizon: '7+ Years (Long-term)', goal: 'Capital Growth' });
+      setMode('live');
+      addToast('Brokerage account linked successfully!', 'success');
+    } catch (err) {
+      setError("Failed to link account. Please try again.");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [addToast]);
   
   const handleSelectPortfolio = (index: number) => {
     if (!suggestionResult) return;
     setSelectedPortfolioIndex(index);
-    setAdvancedAnalytics(null); // Clear analytics when switching portfolio
   };
 
   const handleResetPortfolio = () => {
     setUserAddedAssets([]);
-    setAdvancedAnalytics(null);
+    addToast('Sandbox has been reset to the original AI portfolio.', 'info');
   };
 
   const handleAddStock = async (ticker: string, allocation: number) => {
     if (!activePortfolio) return;
     
     if (activePortfolio.portfolio.some(asset => asset.ticker.toUpperCase() === ticker.toUpperCase())) {
-      setError(`Asset ${ticker.toUpperCase()} is already in the portfolio.`);
-      setTimeout(() => setError(null), 3000);
+      addToast(`Asset ${ticker.toUpperCase()} is already in the portfolio.`, 'error');
       return;
     }
 
     const totalUserAllocation = userAddedAssets.reduce((sum, asset) => sum + asset.allocation, 0);
     if (totalUserAllocation + allocation >= 100) {
-        setError(`Total user allocation cannot exceed 99%.`);
-        setTimeout(() => setError(null), 4000);
+        addToast(`Total user allocation cannot exceed 99%.`, 'error');
         return;
     }
 
     setIsProcessing(true);
-    setError(null);
     try {
       const financials = await fetchAssetFinancials(ticker);
       const newUserAsset: SuggestedAsset = {
@@ -146,13 +225,13 @@ const App: React.FC = () => {
         ticker: ticker.toUpperCase(),
         allocation: allocation,
         isUserAdded: true,
-        purchasePrice: financials.marketData?.currentPrice, // Purchase price is current price for new assets
+        purchasePrice: financials.marketData?.currentPrice,
       };
       
       setUserAddedAssets(prevAssets => [...prevAssets, newUserAsset]);
-      setAdvancedAnalytics(null); // Clear old analytics
+      addToast(`${ticker.toUpperCase()} added to your sandbox portfolio.`, 'success');
     } catch (err) {
-        setError(err instanceof Error ? err.message : `Could not fetch data for ticker ${ticker}.`);
+        addToast(err instanceof Error ? err.message : `Could not fetch data for ticker ${ticker}.`, 'error');
     } finally {
         setIsProcessing(false);
     }
@@ -161,55 +240,50 @@ const App: React.FC = () => {
   const handleOptimizePortfolio = async (goal: OptimizationGoal) => {
     if (!activePortfolio || !userProfile || userAddedAssets.length === 0) return;
     setIsProcessing(true);
-    setError(null);
     try {
         const { fetchOptimizedAllocations } = await import('./services/geminiService');
         const optimizedAllocs = await fetchOptimizedAllocations(activePortfolio.portfolio, goal, userProfile);
         
-        // Create a map for quick lookup
         const allocMap = new Map(optimizedAllocs.map(a => [a.ticker.toUpperCase(), a.allocation]));
 
-        // Update both user-added and base assets based on the new allocations
-        const updatedUserAssets = userAddedAssets.map(asset => ({
+        const newPortfolio: SuggestedAsset[] = activePortfolio.portfolio.map(asset => ({
             ...asset,
             allocation: allocMap.get(asset.ticker.toUpperCase()) ?? asset.allocation,
+            isUserAdded: false,
         }));
         
-        const basePortfolio = allPortfolios[selectedPortfolioIndex];
-        const updatedBaseAssets = basePortfolio.portfolio.map(asset => ({
-            ...asset,
-            allocation: allocMap.get(asset.ticker.toUpperCase()) ?? asset.allocation,
-        }));
-        
-        // This is tricky: we've optimized the combined portfolio. How to split it back?
-        // Simple approach: The sandbox becomes the "new" base. We merge user assets into the main portfolio and clear the userAddedAssets list.
-        const newOptimizedPortfolio: SuggestedAsset[] = activePortfolio.portfolio.map(asset => ({
-            ...asset,
-            allocation: allocMap.get(asset.ticker.toUpperCase()) ?? asset.allocation,
-            isUserAdded: false, // All assets are now part of the optimized base
-        }));
-
-        // Replace the current "base" portfolio with this new optimized one
-        const updatedPortfolioDetails: PortfolioDetails = {
-            ...activePortfolio,
-            title: `${basePortfolio.title} (Optimized)`,
-            portfolio: newOptimizedPortfolio
-        };
-
-        const newSuggestionResult = { ...suggestionResult! };
-        const newAllPortfolios = [...allPortfolios];
-        newAllPortfolios[selectedPortfolioIndex] = updatedPortfolioDetails;
-        
-        // This is a bit of a hack to update the state structure correctly
-        newSuggestionResult.primary = newAllPortfolios[0];
-        newSuggestionResult.alternatives = newAllPortfolios.slice(1);
-        
-        setSuggestionResult(newSuggestionResult);
-        setUserAddedAssets([]); // Clear sandbox as it's now merged
-        setAdvancedAnalytics(null); // Clear old analytics
-
+        if (mode === 'suggestion' && suggestionResult) {
+            const basePortfolio = allSuggestedPortfolios[selectedPortfolioIndex];
+            const updatedPortfolioDetails: PortfolioDetails = {
+                ...activePortfolio,
+                title: `${basePortfolio.title} (Optimized)`,
+                portfolio: newPortfolio,
+            };
+            const newSuggestionResult = { ...suggestionResult };
+            const newAllPortfolios = [...allSuggestedPortfolios];
+            newAllPortfolios[selectedPortfolioIndex] = updatedPortfolioDetails;
+            newSuggestionResult.primary = newAllPortfolios[0];
+            newSuggestionResult.alternatives = newAllPortfolios.slice(1);
+            setSuggestionResult(newSuggestionResult);
+        } else if (mode === 'live' && linkedAccount) {
+            const totalValue = linkedAccount.totalValue;
+            const newHoldings: Holding[] = newPortfolio.map(asset => ({
+                ticker: asset.ticker,
+                name: asset.name,
+                sector: asset.sector,
+                value: totalValue * (asset.allocation / 100),
+                shares: 0, 
+                purchasePrice: asset.purchasePrice ?? 0
+            }));
+             setLinkedAccount({
+                ...linkedAccount,
+                holdings: newHoldings
+            });
+        }
+        setUserAddedAssets([]);
+        addToast('Portfolio allocations have been optimized by AI!', 'success');
     } catch(err) {
-        setError(err instanceof Error ? err.message : 'Optimization failed.');
+        addToast(err instanceof Error ? err.message : 'Optimization failed.', 'error');
     } finally {
         setIsProcessing(false);
     }
@@ -241,7 +315,7 @@ const App: React.FC = () => {
         clearInterval(intervalId);
     };
   }, [activePortfolio]);
-
+  
   const portfolioWithMarketData = useMemo(() => {
     if (!activePortfolio) return null;
     return {
@@ -256,41 +330,49 @@ const App: React.FC = () => {
   const isSandboxMode = userAddedAssets.length > 0;
 
   const Header: React.FC = () => (
-    <div className="text-center p-4 md:p-6 border-b border-gray-700 bg-gray-900">
-      <h1 className="text-3xl md:text-4xl font-bold text-white flex items-center justify-center gap-3">
-        <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-cyan-400" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.486 2 2 6.486 2 12s4.486 10 10 10 10-4.486 10-10S17.514 2 12 2zm0 18c-4.411 0-8-3.589-8-8s3.589-8 8-8 8 3.589 8 8-3.589 8-8 8z"></path><path d="M13 6h-2v6h2V6zm0 8h-2v2h2v-2z"></path><path d="M15.585 14.172 11.03 9.617l-1.414 1.414 4.555 4.555-2.121 2.121 1.414 1.414 2.121-2.121 2.121 2.121 1.414-1.414-2.121-2.121 2.474-2.475-1.414-1.414-2.474 2.475z"></path></svg>
-        AI Portfolio
-      </h1>
-      <p className="text-gray-400 mt-2">powered with investment analysis and market pulse</p>
+    <div className="p-4 md:p-6 border-b border-neutral-800 bg-[#0a0a0a]/80 backdrop-blur-sm sticky top-0 z-10">
+      <div className="container mx-auto">
+        <div className="flex items-center gap-4">
+            <div className="bg-amber-500/10 p-2 rounded-lg">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-9v9" />
+                </svg>
+            </div>
+            <h1 className="text-2xl md:text-3xl font-bold text-neutral-100">
+                AI portfolio
+            </h1>
+        </div>
+      </div>
     </div>
   );
 
   return (
-    <div className="min-h-screen bg-gray-900 text-gray-100">
+    <div className="min-h-screen bg-[#0a0a0a] text-neutral-300">
       <Header />
-      <div className="container mx-auto p-4 md:p-8">
+      <main className="container mx-auto p-4 md:p-8">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-            <aside className="lg:col-span-3 lg:sticky lg:top-8 space-y-6">
-                <div className="bg-gray-800 rounded-lg shadow-xl p-6">
-                    <h2 className="text-lg font-semibold text-white mb-2">Portfolio Controls</h2>
-                    <p className="text-gray-400 mb-4 text-sm">Enter your details to generate a new portfolio.</p>
-                    <InputForm onSubmit={handleSuggestion} isLoading={isLoading} />
-                </div>
-                {suggestionResult && (
-                    <div className="bg-gray-800 rounded-lg shadow-xl p-6 space-y-3 animate-fade-in">
-                         <h3 className="text-lg font-semibold text-white border-b border-gray-700 pb-2 mb-3">Select Portfolio</h3>
-                         {allPortfolios.map((p, index) => (
+            <aside className="lg:col-span-3 lg:sticky lg:top-28 space-y-6">
+                <InputForm 
+                    onGenerate={handleSuggestion} 
+                    onLinkAccount={handleLinkAccount}
+                    isLoading={isLoading} 
+                />
+                
+                {mode === 'suggestion' && suggestionResult && (
+                    <div className="bg-neutral-900 rounded-lg shadow-xl p-6 space-y-3 animate-fade-in">
+                         <h3 className="text-lg font-semibold text-white border-b border-neutral-800 pb-2 mb-3">Select AI Suggestion</h3>
+                         {allSuggestedPortfolios.map((p, index) => (
                             <button 
                                 key={p.title + index}
                                 onClick={() => handleSelectPortfolio(index)}
-                                className={`w-full text-left p-3 rounded-lg transition-colors duration-200 border ${
+                                className={`w-full text-left p-3 rounded-lg transition-all duration-300 border-2 ${
                                     selectedPortfolioIndex === index
-                                    ? 'bg-cyan-600/20 border-cyan-500'
-                                    : 'bg-gray-700/50 border-gray-600 hover:bg-gray-700'
+                                    ? 'bg-amber-500/20 border-amber-500 scale-105 shadow-lg'
+                                    : 'bg-neutral-800/50 border-neutral-700 hover:bg-neutral-700/80 hover:border-neutral-600'
                                 }`}
                             >
-                                <p className="font-semibold text-white text-sm">{p.title}</p>
-                                <p className="text-xs text-gray-400 mt-1">
+                                <p className="font-semibold text-neutral-100 text-sm">{p.title}</p>
+                                <p className="text-xs text-neutral-400 mt-1">
                                     Risk: {p.strategy.portfolioMetrics.riskScore}/10 &bull; Return: {p.strategy.portfolioMetrics.expectedReturn.toFixed(1)}%
                                 </p>
                             </button>
@@ -299,25 +381,25 @@ const App: React.FC = () => {
                 )}
             </aside>
 
-            <main className="lg:col-span-6">
+            <section className="lg:col-span-6 space-y-6">
                 {isLoading && <LoadingSpinner />}
                 {error && !isLoading && <ErrorDisplay message={error} />}
-                {!isLoading && !error && portfolioWithMarketData && userProfile && (
-                    <AnalysisResult 
+                
+                {!isLoading && !activePortfolio && <WelcomeScreen />}
+                
+                {portfolioWithMarketData && userProfile && (
+                     <AnalysisResult 
                         data={portfolioWithMarketData} 
                         isMarketDataLoading={isMarketDataLoading}
                         totalValue={userProfile.amount}
+                        mode={mode}
+                        performanceHistory={performanceHistory}
+                        aiSuggestionPerformance={suggestionResult ? suggestionResult.primary : null}
                     />
                 )}
-                {!isLoading && !suggestionResult && (
-                    <div className="text-center py-16 px-6 bg-gray-800 rounded-lg">
-                        <h2 className="text-2xl font-semibold text-white">Welcome to AI Portfolio</h2>
-                        <p className="text-gray-400 mt-2">Use the controls on the left to generate your personalized investment portfolio analysis.</p>
-                    </div>
-                )}
-            </main>
+            </section>
 
-            <aside className="lg:col-span-3 lg:sticky lg:top-8">
+            <aside className="lg:col-span-3 lg:sticky lg:top-28">
                 {activePortfolio && portfolioWithMarketData && (
                     <PortfolioSandbox
                         portfolio={portfolioWithMarketData}
@@ -326,12 +408,14 @@ const App: React.FC = () => {
                         onOptimize={handleOptimizePortfolio}
                         isSandboxMode={isSandboxMode}
                         isProcessing={isProcessing}
+                        addToast={addToast}
                     />
                 )}
             </aside>
         </div>
-      </div>
-      <style>{`@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } } .animate-fade-in { animation: fade-in 0.5s ease-out forwards; }`}</style>
+      </main>
+      <ToastContainer toasts={toasts} removeToast={removeToast} />
+      <style>{`@keyframes fade-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } } .animate-fade-in { animation: fade-in 0.5s ease-out forwards; }`}</style>
     </div>
   );
 };

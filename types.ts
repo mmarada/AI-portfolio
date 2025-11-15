@@ -1,3 +1,4 @@
+
 export interface MarketData {
   currentPrice: number;
   priceChange: number;
@@ -7,6 +8,7 @@ export interface MarketData {
 export interface SuggestedAsset {
   ticker: string;
   name: string;
+  sector: string;
   allocation: number; // Percentage
   beta: number;
   expectedReturn: number;
@@ -96,4 +98,35 @@ export interface TaxLossSuggestion {
     replaceWithTicker: string;
     replaceWithName: string;
     rationale: string;
+}
+
+// --- Live Portfolio Types ---
+
+export interface Holding {
+    ticker: string;
+    name: string;
+    sector: string;
+    shares: number;
+    value: number;
+    purchasePrice: number;
+}
+
+export interface LinkedAccount {
+    accountName: string;
+    totalValue: number;
+    holdings: Holding[];
+}
+
+export interface PerformanceDataPoint {
+    date: string;
+    portfolioValue: number;
+    benchmarkValue: number;
+    aiSuggestionValue: number;
+}
+
+// --- UI Types ---
+export interface ToastMessage {
+    id: number;
+    message: string;
+    type: 'success' | 'error' | 'info';
 }

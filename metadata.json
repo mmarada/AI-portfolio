@@ -1,5 +1,5 @@
 {
-  "name": "AI Portfolio",
-  "description": "An AI-powered portfolio generator that provides investment analysis and market pulse to suggest custom portfolios based on your risk tolerance.",
+  "name": "AI portfolio",
+  "description": "An intelligent investment cockpit that provides AI-powered portfolio suggestions, advanced analytics, and live performance tracking.",
   "requestFramePermissions": []
 }

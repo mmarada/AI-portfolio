@@ -18,13 +18,14 @@ const portfolioDetailsSchema = {
                 properties: {
                     ticker: { type: Type.STRING },
                     name: { type: Type.STRING },
+                    sector: { type: Type.STRING, description: "The economic sector of the asset, e.g., 'Technology'." },
                     allocation: { type: Type.NUMBER, description: "Percentage of the portfolio, e.g., 40 for 40%" },
                     beta: { type: Type.NUMBER },
                     expectedReturn: { type: Type.NUMBER, description: "Estimated annualized return as a percentage, e.g., 8.5 for 8.5%" },
                     volatility: { type: Type.NUMBER, description: "Estimated annualized volatility (standard deviation) as a percentage, e.g., 15.2 for 15.2%" },
                     rationale: { type: Type.STRING, description: "Brief reason for including this asset." },
                 },
-                required: ['ticker', 'name', 'allocation', 'beta', 'expectedReturn', 'volatility', 'rationale'],
+                required: ['ticker', 'name', 'sector', 'allocation', 'beta', 'expectedReturn', 'volatility', 'rationale'],
             },
         },
         strategy: {
@@ -92,6 +93,7 @@ export const fetchPortfolioSuggestion = async (amount: number, riskLevel: string
     - Current market sentiment, economic indicators, and the client's horizon/goals.
     - Fundamental analysis of the companies/funds.
     - Key financial metrics: beta for volatility, but also estimate annualized return and volatility (standard deviation).
+    - For each asset, provide its economic sector (e.g., 'Technology', 'Healthcare', 'Financials').
 
     Provide a response in a valid JSON format that adheres to the provided schema. The response MUST include a 'primary' portfolio and exactly two 'alternatives'.
 
