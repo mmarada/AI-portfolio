@@ -56,18 +56,17 @@ const AllocationTreemap: React.FC<{ data: SuggestedAsset[] }> = ({ data }) => {
             <Treemap
                 data={chartData}
                 dataKey="size"
-                ratio={4 / 3}
                 stroke="#fff"
                 content={<CustomizedTreemapContent />}
                 isAnimationActive={false}
             >
+                <Tooltip
+                    formatter={(value: number, name: string) => [`${value.toFixed(2)}%`, name]}
+                    contentStyle={{ backgroundColor: '#171717', border: '1px solid #262626', borderRadius: '0.5rem' }}
+                    itemStyle={{ color: '#e5e5e5' }}
+                    labelStyle={{ display: 'none' }}
+                />
             </Treemap>
-            <Tooltip
-                formatter={(value: number, name: string) => [`${value.toFixed(2)}%`, name]}
-                contentStyle={{ backgroundColor: '#171717', border: '1px solid #262626', borderRadius: '0.5rem' }}
-                itemStyle={{ color: '#e5e5e5' }}
-                labelStyle={{ display: 'none' }}
-            />
         </ResponsiveContainer>
     );
 };

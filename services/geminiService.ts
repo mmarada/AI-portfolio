@@ -1,11 +1,19 @@
+'use server';
+
 import { GoogleGenAI, Type } from "@google/genai";
-import { PortfolioSuggestion, RecommendedStock, SuggestedAsset, AdvancedAnalytics, TaxLossSuggestion, OptimizationGoal, OptimizedAllocation } from '../types';
+import { RecommendedStock, SuggestedAsset, AdvancedAnalytics, TaxLossSuggestion, OptimizationGoal, OptimizedAllocation, PortfolioDetails } from '../types';
 
-if (!process.env.API_KEY) {
-    throw new Error("API_KEY environment variable is not set.");
-}
-
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+let aiClient: GoogleGenAI | null = null;
+const getAI = () => {
+    if (!aiClient) {
+        const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+        if (!apiKey) {
+            throw new Error("GEMINI_API_KEY environment variable is not set.");
+        }
+        aiClient = new GoogleGenAI({ apiKey });
+    }
+    return aiClient;
+};
 
 const portfolioDetailsSchema = {
     type: Type.OBJECT,
@@ -63,21 +71,7 @@ const portfolioDetailsSchema = {
     required: ['title', 'portfolio', 'strategy'],
 };
 
-const responseSchema = {
-  type: Type.OBJECT,
-  properties: {
-    primary: portfolioDetailsSchema,
-    alternatives: {
-        type: Type.ARRAY,
-        description: "Provide exactly two alternative portfolios: one more conservative, one more aggressive.",
-        items: portfolioDetailsSchema,
-    }
-  },
-  required: ['primary', 'alternatives'],
-};
-
-
-export const fetchPortfolioSuggestion = async (amount: number, riskLevel: string, horizon: string, goal: string): Promise<PortfolioSuggestion> => {
+export const fetchPrimaryPortfolio = async (amount: number, riskLevel: string, horizon: string, goal: string): Promise<PortfolioDetails> => {
   const prompt = `
     Act as a world-class quantitative investment strategist. A client wants a portfolio suggestion based on the following criteria:
     - Investment Amount: $${amount}
@@ -85,8 +79,7 @@ export const fetchPortfolioSuggestion = async (amount: number, riskLevel: string
     - Investment Horizon: ${horizon}
     - Financial Goal: ${goal}
 
-    Your task is to create a primary diversified portfolio and TWO alternative portfolios (one more conservative, one more aggressive).
-    Each portfolio should contain 3-5 stocks and/or index funds (ETFs) that align with the client's profile. Do NOT include any cryptocurrencies.
+    Your task is to create a primary diversified portfolio that contains 3-5 stocks and/or index funds (ETFs) that align with the client's profile. Do NOT include any cryptocurrencies.
     Map the risk tolerance to the portfolio's overall beta (e.g., Conservative < 0.8, Moderate 0.8-1.2, Aggressive > 1.2) and assign a risk score from 1-10.
 
     For your analysis, consider:
@@ -95,48 +88,90 @@ export const fetchPortfolioSuggestion = async (amount: number, riskLevel: string
     - Key financial metrics: beta for volatility, but also estimate annualized return and volatility (standard deviation).
     - For each asset, provide its economic sector (e.g., 'Technology', 'Healthcare', 'Financials').
 
-    Provide a response in a valid JSON format that adheres to the provided schema. The response MUST include a 'primary' portfolio and exactly two 'alternatives'.
+    Provide a response in a valid JSON format that adheres to the provided schema.
 
-    - primary: The main portfolio that best matches all the user's criteria.
-    - alternatives: An array containing exactly two other portfolios:
-        1. A slightly more conservative version.
-        2. A slightly more aggressive version.
-    - For each portfolio:
-      - title: A descriptive title (e.g., "Balanced Growth Portfolio (Primary)", "Conservative Alternative", "Aggressive Growth Alternative").
-      - allocation: The sum of allocations must be 100.
-      - riskScore: A numerical risk score from 1 (very low) to 10 (very high).
-      - summary: Explain why this is an efficient strategy, referencing the client's goals.
-      - benchmarks: Provide 2-3 relevant benchmark data points for comparison on a risk vs. return chart (e.g., 'S&P 500', 'Bonds').
+    - title: A descriptive title (e.g., "Balanced Growth Portfolio").
+    - allocation: The sum of allocations must be 100.
+    - riskScore: A numerical risk score from 1 (very low) to 10 (very high).
+    - summary: Explain why this is an efficient strategy, referencing the client's goals.
+    - benchmarks: Provide 2-3 relevant benchmark data points for comparison on a risk vs. return chart (e.g., 'S&P 500', 'Bonds').
   `;
 
   try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-pro',
+    const response = await getAI().models.generateContent({
+      model: 'gemini-2.5-flash',
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
-        responseSchema: responseSchema,
-        temperature: 0.3,
+        responseSchema: portfolioDetailsSchema,
+        temperature: 0.2,
+      },
+    });
+    
+    const text = response.text.trim();
+    return JSON.parse(text) as PortfolioDetails;
+  } catch (error) {
+    console.error("Error fetching primary portfolio suggestion:", error);
+    throw new Error(`Failed to generate a primary portfolio. The AI model may have returned an invalid structure. Please try again.`);
+  }
+};
+
+const alternativesSchema = {
+    type: Type.ARRAY,
+    description: "Provide exactly two alternative portfolios: one more conservative, one more aggressive.",
+    items: portfolioDetailsSchema,
+};
+
+export const fetchAlternativePortfolios = async (amount: number, riskLevel: string, horizon: string, goal: string, primaryPortfolio: PortfolioDetails): Promise<PortfolioDetails[]> => {
+    const prompt = `
+    Act as a world-class quantitative investment strategist. A client's profile is:
+    - Investment Amount: $${amount}
+    - Risk Tolerance: ${riskLevel}
+    - Investment Horizon: ${horizon}
+    - Financial Goal: ${goal}
+
+    Their primary suggested portfolio is:
+    - Title: ${primaryPortfolio.title}
+    - Risk Score: ${primaryPortfolio.strategy.portfolioMetrics.riskScore}
+    - Assets: ${primaryPortfolio.portfolio.map(a => `${a.ticker} (${a.allocation.toFixed(1)}%)`).join(', ')}
+
+    Your task is to create TWO alternative portfolios, based on the same client profile but with adjusted risk:
+    1. A slightly more conservative version than the primary.
+    2. A slightly more aggressive version than the primary.
+
+    Each portfolio should contain 3-5 stocks and/or index funds (ETFs). Do NOT include any cryptocurrencies.
+    Adjust the beta, risk score, and asset selection accordingly.
+
+    Provide a response in a valid JSON format that adheres to the provided schema: an array containing exactly two portfolio objects.
+    - For each portfolio, provide all the same details as the primary: title, portfolio assets with full details, strategy analysis, etc.
+    - Ensure the titles clearly reflect their nature (e.g., "Conservative Alternative", "Aggressive Growth Alternative").
+  `;
+
+  try {
+    const response = await getAI().models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: alternativesSchema,
+        temperature: 0.5, // A bit more creativity for alternatives
       },
     });
     
     const text = response.text.trim();
     const data = JSON.parse(text);
 
-    // Basic validation to ensure the API returned the expected structure
-    if (!data.primary || !Array.isArray(data.alternatives) || data.alternatives.length < 2) {
-      throw new Error("API response is missing primary or sufficient alternative portfolios.");
+    if (!Array.isArray(data) || data.length < 2) {
+      throw new Error("API response is missing sufficient alternative portfolios.");
     }
-
-    return data as PortfolioSuggestion;
+    
+    return data as PortfolioDetails[];
   } catch (error) {
-    console.error("Error fetching portfolio suggestion:", error);
-    if (error instanceof Error && error.message.includes("API response")) {
-        throw error;
-    }
-    throw new Error(`Failed to generate a portfolio. The AI model may have returned an invalid structure. Please try again.`);
+    console.error("Error fetching alternative portfolios:", error);
+    throw new Error(`Failed to generate alternative portfolios. Please try again.`);
   }
 };
+
 
 const recommendationSchema = {
     type: Type.ARRAY,
@@ -162,7 +197,7 @@ export const fetchDiversificationSuggestions = async (portfolio: SuggestedAsset[
     `;
     
     try {
-        const response = await ai.models.generateContent({
+        const response = await getAI().models.generateContent({
             model: 'gemini-2.5-flash',
             contents: prompt,
             config: {
@@ -231,7 +266,7 @@ export const fetchAdvancedAnalytics = async (portfolio: SuggestedAsset[], totalV
     `;
 
     try {
-        const response = await ai.models.generateContent({
+        const response = await getAI().models.generateContent({
             model: 'gemini-2.5-pro',
             contents: prompt,
             config: {
@@ -284,7 +319,7 @@ export const fetchTaxLossHarvestingSuggestions = async (portfolio: SuggestedAsse
     `;
 
     try {
-        const response = await ai.models.generateContent({
+        const response = await getAI().models.generateContent({
             model: 'gemini-2.5-flash',
             contents: prompt,
             config: {
@@ -330,7 +365,7 @@ export const fetchOptimizedAllocations = async (portfolio: SuggestedAsset[], goa
     `;
     
     try {
-        const response = await ai.models.generateContent({
+        const response = await getAI().models.generateContent({
             model: 'gemini-2.5-pro',
             contents: prompt,
             config: {

@@ -1,5 +1,6 @@
 {
   "name": "AI portfolio",
   "description": "An intelligent investment cockpit that provides AI-powered portfolio suggestions, advanced analytics, and live performance tracking.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [],
+  "majorCapabilities": []
 }

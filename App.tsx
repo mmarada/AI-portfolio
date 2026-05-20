@@ -1,7 +1,7 @@
 
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { PortfolioSuggestion, PortfolioDetails, SuggestedAsset, MarketData, OptimizationGoal, LinkedAccount, PerformanceDataPoint, Holding, ToastMessage } from './types';
-import { fetchPortfolioSuggestion } from './services/geminiService';
+import { fetchPrimaryPortfolio, fetchAlternativePortfolios } from './services/geminiService';
 import { fetchMarketData, fetchAssetFinancials, simulateLinkBrokerageAccount, fetchPerformanceHistory } from './services/marketDataService';
 import InputForm from './components/InputForm';
 import AnalysisResult from './components/AnalysisResult';
@@ -19,6 +19,7 @@ const App: React.FC = () => {
   // Suggestion Mode State
   const [suggestionResult, setSuggestionResult] = useState<PortfolioSuggestion | null>(null);
   const [selectedPortfolioIndex, setSelectedPortfolioIndex] = useState(0);
+  const [areAlternativesLoading, setAreAlternativesLoading] = useState<boolean>(false);
   
   // Live Mode State
   const [linkedAccount, setLinkedAccount] = useState<LinkedAccount | null>(null);
@@ -49,13 +50,14 @@ const App: React.FC = () => {
 
   const allSuggestedPortfolios = useMemo(() => {
     if (!suggestionResult) return [];
-    return [suggestionResult.primary, ...suggestionResult.alternatives];
+    // Ensure alternatives exist before spreading
+    return [suggestionResult.primary, ...(suggestionResult.alternatives || [])];
   }, [suggestionResult]);
   
   const activePortfolio = useMemo<PortfolioDetails | null>(() => {
     let basePortfolio: PortfolioDetails | null = null;
 
-    if (mode === 'suggestion' && suggestionResult) {
+    if (mode === 'suggestion' && suggestionResult && allSuggestedPortfolios[selectedPortfolioIndex]) {
         basePortfolio = allSuggestedPortfolios[selectedPortfolioIndex];
     } else if (mode === 'live' && linkedAccount) {
         const liveAssets = linkedAccount.holdings.map((h: Holding) => ({
@@ -137,35 +139,48 @@ const App: React.FC = () => {
     setUserProfile({amount, riskLevel, horizon, goal});
 
     try {
-      const data = await fetchPortfolioSuggestion(amount, riskLevel, horizon, goal);
+      // Step 1: Fetch primary portfolio
+      const primaryData = await fetchPrimaryPortfolio(amount, riskLevel, horizon, goal);
       
-      const allTickers = [
-          ...data.primary.portfolio.map(a => a.ticker),
-          ...data.alternatives.flatMap(p => p.portfolio.map(a => a.ticker))
-      ];
-      const uniqueTickers = [...new Set(allTickers)];
-      const liveMarketData = await fetchMarketData(uniqueTickers);
+      const primaryTickers = primaryData.portfolio.map(a => a.ticker);
+      const primaryMarketData = await fetchMarketData(primaryTickers);
 
-      const addSimulatedPrices = (p: PortfolioDetails): PortfolioDetails => ({
+      const addSimulatedPrices = (p: PortfolioDetails, marketData: Record<string, MarketData>): PortfolioDetails => ({
           ...p,
           portfolio: p.portfolio.map(asset => ({
               ...asset,
-              purchasePrice: liveMarketData[asset.ticker]?.currentPrice * (1 + (Math.random() - 0.2) * 0.2)
+              purchasePrice: marketData[asset.ticker]?.currentPrice * (1 + (Math.random() - 0.2) * 0.2)
           }))
       });
+      const primaryWithPrices = addSimulatedPrices(primaryData, primaryMarketData);
 
-      const dataWithPrices: PortfolioSuggestion = {
-          primary: addSimulatedPrices(data.primary),
-          alternatives: data.alternatives.map(addSimulatedPrices)
-      };
-
-      setSuggestionResult(dataWithPrices);
+      // Step 2: Set primary portfolio in state, stop main loading
+      setSuggestionResult({ primary: primaryWithPrices, alternatives: [] });
       setSelectedPortfolioIndex(0);
-      addToast('AI portfolio suggestions generated successfully!', 'success');
+      setIsLoading(false);
+      setAreAlternativesLoading(true);
+      addToast('Primary AI portfolio generated! Finding alternatives...', 'info');
+
+      // Step 3: Fetch alternatives in the background
+      const alternativeData = await fetchAlternativePortfolios(amount, riskLevel, horizon, goal, primaryWithPrices);
+      
+      const alternativeTickers = alternativeData.flatMap(p => p.portfolio.map(a => a.ticker));
+      const uniqueAlternativeTickers = [...new Set(alternativeTickers)].filter(t => !primaryMarketData[t]);
+      const alternativeMarketData = uniqueAlternativeTickers.length > 0 ? await fetchMarketData(uniqueAlternativeTickers) : {};
+      const allMarketData = { ...primaryMarketData, ...alternativeMarketData };
+      
+      const alternativesWithPrices = alternativeData.map(p => addSimulatedPrices(p, allMarketData));
+      
+      // Step 4: Update state with alternatives
+      setSuggestionResult(prev => prev ? { ...prev, alternatives: alternativesWithPrices } : null);
+      addToast('Alternative portfolios are ready!', 'success');
+
     } catch (err) {
       setError(err instanceof Error ? err.message : "An unknown error occurred.");
+      addToast(err instanceof Error ? err.message : 'An error occurred during generation.', 'error');
     } finally {
       setIsLoading(false);
+      setAreAlternativesLoading(false);
     }
   }, [addToast]);
 
@@ -377,6 +392,17 @@ const App: React.FC = () => {
                                 </p>
                             </button>
                         ))}
+                        {areAlternativesLoading && (
+                            <div className="text-center p-3 rounded-lg bg-neutral-800/50 border-2 border-dashed border-neutral-700">
+                                <p className="flex items-center justify-center gap-2 text-sm text-neutral-400">
+                                    <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    Loading alternatives...
+                                </p>
+                            </div>
+                        )}
                     </div>
                 )}
             </aside>
