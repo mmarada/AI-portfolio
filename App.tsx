@@ -1,7 +1,7 @@
 
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { PortfolioSuggestion, PortfolioDetails, SuggestedAsset, MarketData, OptimizationGoal, LinkedAccount, PerformanceDataPoint, Holding, ToastMessage } from './types';
-import { fetchPrimaryPortfolio, fetchAlternativePortfolios } from './services/geminiService';
+import { fetchPrimaryPortfolio, fetchAlternativePortfolios, fetchOptimizedAllocations } from './services/geminiService';
 import { fetchMarketData, fetchAssetFinancials, simulateLinkBrokerageAccount, fetchPerformanceHistory } from './services/marketDataService';
 import InputForm from './components/InputForm';
 import AnalysisResult from './components/AnalysisResult';
@@ -256,7 +256,6 @@ const App: React.FC = () => {
     if (!activePortfolio || !userProfile || userAddedAssets.length === 0) return;
     setIsProcessing(true);
     try {
-        const { fetchOptimizedAllocations } = await import('./services/geminiService');
         const optimizedAllocs = await fetchOptimizedAllocations(activePortfolio.portfolio, goal, userProfile);
         
         const allocMap = new Map(optimizedAllocs.map(a => [a.ticker.toUpperCase(), a.allocation]));
